@@ -2,7 +2,7 @@
 
 #define _LEN(x,y) sizeof(x) / sizeof(y)
 
-#define FADESPEED 1     // make this higher to slow down
+#define RELAY_DELAY 1000  // Delay between toggles of the relay (to mimic user input on the HDMI switch)
 
 const int FANPORTS[4] = {FANPIN1, FANPIN2, FANPIN3, FANPIN4};
 const int LOCKBANKS[2] = {LOCKSETPIN1, LOCKSETPIN2};
@@ -16,7 +16,8 @@ const int LEDBANKS[4][3] = {
    {REDPIN4, GREENPIN4, BLUEPIN4}
 };
 
-int lockSwState[2] = {0,0};
+int *lockSwState = (int *)malloc(sizeof(LOCKSWBANKS));
+long *ledState = (long *)malloc(_LEN(LEDBANKS, int) * sizeof(long));
 int *currentFanSpeed = (int *)malloc(sizeof(FANPORTS));
 int reqSw = 1;
 
@@ -48,13 +49,12 @@ void setup() {
 
   // Null out the current fan speeds.
   memset(currentFanSpeed, 0, sizeof(FANPORTS));
+  memset(ledState, 0, sizeof(_LEN(LEDBANKS, int) * sizeof(long)));
+  memset(lockSwState, 0, sizeof(LOCKSWBANKS));
 }
  
-void setLED(int bank, char *rgb) {
+void setLED(int bank, long color) {
   int red, green, blue;
-  long color;
-
-  color = strtol(rgb, NULL, 16);
   
   red = ((color >> 16) & 0xFF);
   green = ((color >> 8) & 0xFF);
@@ -66,8 +66,25 @@ void setLED(int bank, char *rgb) {
 }
 
 void loop() {
+  int i = 0;
+  int swState;
+  
   // Get switch states.
-  lockSwState = {digitalRead(LOCKSETSWPIN1), digitalRead(LOCKSETSWPIN2)};
+  for(i = 0; i < _LEN(LOCKSWBANKS, int); i++) {
+    swState = digitalRead(LOCKSWBANKS[i]);
+    
+    if (swState != lockSwState[i]) {
+      lockSwState[i] = swState;
+
+      if (lockSwState[i] == HIGH) {
+        Serial.println("Door opened.");
+        setLED(0, 0xffffff);
+      } else {
+        Serial.println("Door closed.");
+        setLED(0, ledState[0]);
+      }
+    }
+  }
  
   if (Serial.available() > 0) {
     int c = Serial.read();
@@ -78,14 +95,17 @@ void loop() {
         char colorBuff[8];
         char bankBuff[2];
         int bank;
+        long color;
         
         r = Serial.readBytes(colorBuff, 7);
         colorBuff[7] = 0;
         
         bankBuff = {colorBuff[0], 0};
-        bank = strtol(bankBuff, NULL, 10);  
+        bank = strtol(bankBuff, NULL, 10);          
+        color = strtol(&colorBuff[1], NULL, 16);
         
-        setLED(bank, &colorBuff[1]);
+        ledState[bank] = color;        
+        setLED(bank, color);
         
         break;
       case 'g': // Get info
@@ -107,13 +127,7 @@ void loop() {
         fbank = opts[0] - 48;
         fanSpeed = strtol(&opts[1], NULL, 16);
         
-        Serial.print("Setting fan ");
-        Serial.print(fbank, DEC);
-        Serial.print(" with speed ");
-        Serial.println(fanSpeed, HEX);
-      
         currentFanSpeed[fbank] = fanSpeed;
-      
         analogWrite(FANPORTS[fbank], fanSpeed);
       
         break;
@@ -127,12 +141,12 @@ void loop() {
       case 'u': // Unlock Bank: u[bank]  eg. u0
         char ubank;
         Serial.readBytes(&ubank, 1);
-        Serial.println(ubank);23
+        Serial.println(ubank);
         digitalWrite(LOCKBANKS[ubank-48], LOW);
         break;
       case 'r': // "press" switch connected to relay.
         digitalWrite(RELAYPIN, HIGH);
-        delay(1000);
+        delay(RELAY_DELAY);
         digitalWrite(RELAYPIN, LOW);
         break;
       case 'x': // Toggle the switch press lock requirement.
