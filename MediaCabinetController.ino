@@ -2,13 +2,17 @@
 
 #define _LEN(x,y) sizeof(x) / sizeof(y)
 
+// Configuration
+
+#define DEBOUNCE 20
 #define RELAY_DELAY 1000  // Delay between toggles of the relay (to mimic user input on the HDMI switch)
+#define DOOROPEN_COLOR 0xFFFFFF
+
+// Constants
 
 const int FANPORTS[4] = {FANPIN1, FANPIN2, FANPIN3, FANPIN4};
 const int LOCKBANKS[2] = {LOCKSETPIN1, LOCKSETPIN2};
 const int LOCKSWBANKS[2] = {LOCKSETSWPIN1, LOCKSETSWPIN2};
-
-// Bank of LED Strips.
 const int LEDBANKS[4][3] = {
    {REDPIN1, GREENPIN1, BLUEPIN1},
    {REDPIN2, GREENPIN2, BLUEPIN2},
@@ -16,13 +20,21 @@ const int LEDBANKS[4][3] = {
    {REDPIN4, GREENPIN4, BLUEPIN4}
 };
 
+// State
+
+int *lockState = (int *)malloc(sizeof(LOCKBANKS));
 int *lockSwState = (int *)malloc(sizeof(LOCKSWBANKS));
+int *lockOnClose = (int *)malloc(sizeof(LOCKBANKS));
 long *ledState = (long *)malloc(_LEN(LEDBANKS, int) * sizeof(long));
 int *currentFanSpeed = (int *)malloc(sizeof(FANPORTS));
 int reqSw = 1;
+int doorOpenLighting = 1;  // When true, opening the doors will cause the LEDs to turn bright white. 
+                           // Closing the door will restore them to their prior color.
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
+  // Bluetooth Mate Silver 
+  Serial3.begin(115200);
   
   int i, x;
 
@@ -47,10 +59,12 @@ void setup() {
 
   pinMode(RELAYPIN, OUTPUT);
 
-  // Null out the current fan speeds.
+  // Null out the state variables.
   memset(currentFanSpeed, 0, sizeof(FANPORTS));
-  memset(ledState, 0, sizeof(_LEN(LEDBANKS, int) * sizeof(long)));
+  memset(ledState, 0, _LEN(LEDBANKS, int) * sizeof(long));
   memset(lockSwState, 0, sizeof(LOCKSWBANKS));
+  memset(lockState, 0, sizeof(LOCKBANKS));
+  memset(lockOnClose, 0, sizeof(LOCKBANKS));
 }
  
 void setLED(int bank, long color) {
@@ -65,9 +79,14 @@ void setLED(int bank, long color) {
   analogWrite(LEDBANKS[bank][2], blue); 
 }
 
+HardwareSerial *activeSerial;
+
 void loop() {
   int i = 0;
   int swState;
+  int c;
+  
+  delay(DEBOUNCE); // Faux-debounce. 
   
   // Get switch states.
   for(i = 0; i < _LEN(LOCKSWBANKS, int); i++) {
@@ -78,26 +97,43 @@ void loop() {
 
       if (lockSwState[i] == HIGH) {
         Serial.println("Door opened.");
-        setLED(0, 0xffffff);
+        Serial3.println("Door opened.");
+        if (doorOpenLighting)
+          setLED(0, DOOROPEN_COLOR);
       } else {
         Serial.println("Door closed.");
+        Serial3.println("Door closed.");
         setLED(0, ledState[0]);
+        if (lockOnClose[i] == 1) {
+          digitalWrite(LOCKBANKS[i], HIGH);
+          lockOnClose[i] = 0;
+        }
       }
     }
   }
  
   if (Serial.available() > 0) {
-    int c = Serial.read();
+    activeSerial = &Serial;
+    c = Serial.read();
+  } else if (Serial3.available() > 0) {
+    Serial.println("B"); // Inform listener there was a Bluetooth command executed    
+    c = Serial3.read();
+    activeSerial = &Serial3;
+  } else {
+    c = -1;
+  }
+  
+  if (c > -1) {
     int r;
+    char bank = 0;
     
     switch (c) {
       case 'c': // Set LED Bank Color: c[bank][rrggbb]  eg. c0ffffff
         char colorBuff[8];
         char bankBuff[2];
-        int bank;
         long color;
         
-        r = Serial.readBytes(colorBuff, 7);
+        r = activeSerial->readBytes(colorBuff, 7);
         colorBuff[7] = 0;
         
         bankBuff = {colorBuff[0], 0};
@@ -105,50 +141,67 @@ void loop() {
         color = strtol(&colorBuff[1], NULL, 16);
         
         ledState[bank] = color;        
-        setLED(bank, color);
+        
+        // Activate the color if the door is closed,
+        // otherwise it will get activated on next closure.      
+        if (lockSwState[bank] || !doorOpenLighting)
+          setLED(bank, color);
         
         break;
       case 'g': // Get info
         int x;
         for(x = 0; x < _LEN(FANPORTS, int); x++) {
-          Serial.print("f");
-          Serial.print(x, DEC);
-          Serial.println(currentFanSpeed[x], DEC);
+          activeSerial->print("f");
+          activeSerial->print(x, DEC);
+          activeSerial->println(currentFanSpeed[x], DEC);
+        }
+        for(x = 0; x < _LEN(LOCKSWBANKS, int); x++) {
+          activeSerial->print("lss");
+          activeSerial->print(x, DEC);
+          activeSerial->println(lockSwState[x], DEC);
         }
         break;
       case 'f': // Fan Control: f[bank][speed in hex]  eg. f1ff
         char opts[4];
         int fanSpeed;
-        int fbank;
       
-        r = Serial.readBytes(opts, 3);
+        r = activeSerial->readBytes(opts, 3);
         opts[3] = 0;
       
-        fbank = opts[0] - 48;
+        bank = opts[0] - 48;
         fanSpeed = strtol(&opts[1], NULL, 16);
         
-        currentFanSpeed[fbank] = fanSpeed;
-        analogWrite(FANPORTS[fbank], fanSpeed);
+        currentFanSpeed[bank] = fanSpeed;
+        analogWrite(FANPORTS[bank], fanSpeed);
       
         break;
       case 'l': // Lock Bank: l[bank]  eg. l1
-        char lbank;
-        Serial.readBytes(&lbank, 1);        
+        activeSerial->readBytes(&bank, 1);        
         
-        if (!lockSwState[lbank-48] || !reqSw)
-          digitalWrite(LOCKBANKS[lbank-48], HIGH);
+        if (!lockSwState[bank-48] || !reqSw) {
+          digitalWrite(LOCKBANKS[bank-48], HIGH);
+          lockState[bank-48] = 1;
+        }
+        break;
+      case 'U': // Unlock Bank and set Lock On Close, same syntax as u
+        activeSerial->readBytes(&bank, 1);
+        digitalWrite(LOCKBANKS[bank-48], LOW);
+        lockOnClose[bank-48] = 1;
+        lockState[bank-48] = 0;
         break;
       case 'u': // Unlock Bank: u[bank]  eg. u0
-        char ubank;
-        Serial.readBytes(&ubank, 1);
-        Serial.println(ubank);
-        digitalWrite(LOCKBANKS[ubank-48], LOW);
+        activeSerial->readBytes(&bank, 1);
+        digitalWrite(LOCKBANKS[bank-48], LOW);
+        lockState[bank-48] = 0;
         break;
       case 'r': // "press" switch connected to relay.
         digitalWrite(RELAYPIN, HIGH);
         delay(RELAY_DELAY);
         digitalWrite(RELAYPIN, LOW);
         break;
+      case 'd': // Toggle door lighting
+         doorOpenLighting = !doorOpenLighting;
+         break;
       case 'x': // Toggle the switch press lock requirement.
         reqSw = !reqSw;
         break;
