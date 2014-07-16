@@ -22,6 +22,7 @@ const int LEDBANKS[4][3] = {
 
 // State
 
+int *ledToLockBank = (int *)malloc(sizeof(LEDBANKS));
 int *lockState = (int *)malloc(sizeof(LOCKBANKS));
 int *lockSwState = (int *)malloc(sizeof(LOCKSWBANKS));
 int *lockOnClose = (int *)malloc(sizeof(LOCKBANKS));
@@ -30,16 +31,20 @@ int *currentFanSpeed = (int *)malloc(sizeof(FANPORTS));
 int reqSw = 1;
 int doorOpenLighting = 1;  // When true, opening the doors will cause the LEDs to turn bright white. 
                            // Closing the door will restore them to their prior color.
-
 void setup() {
   Serial.begin(115200);
   // Bluetooth Mate Silver 
   Serial3.begin(115200);
+
+  ledToLockBank[0] = 1;
+  ledToLockBank[1] = 1;
+  ledToLockBank[2] = 0;
+  ledToLockBank[3] = 0;
   
   int i, x;
 
   // Set LED pin outputs.  
-  for(i = 0; i < (_LEN(LEDBANKS, int)); i++) {
+  for(i = 0; i < (_LEN(LEDBANKS, int) / 3); i++) {
     for(x = 0; x < 3; x++) {
       pinMode(LEDBANKS[i][x], OUTPUT);
     }
@@ -58,6 +63,11 @@ void setup() {
   }
 
   pinMode(RELAYPIN, OUTPUT);
+  digitalWrite(RELAYPIN, LOW);
+
+  digitalWrite(BLUEPIN4, HIGH);
+  digitalWrite(REDPIN4, HIGH);
+  digitalWrite(GREENPIN4, HIGH);
 
   // Null out the state variables.
   memset(currentFanSpeed, 0, sizeof(FANPORTS));
@@ -82,6 +92,7 @@ void setLED(int bank, long color) {
 HardwareSerial *activeSerial;
 
 void loop() {
+  int n = 0;
   int i = 0;
   int swState;
   int c;
@@ -90,6 +101,8 @@ void loop() {
   
   // Get switch states.
   for(i = 0; i < _LEN(LOCKSWBANKS, int); i++) {
+    Serial.print("i = ");
+    Serial.println(i);
     swState = digitalRead(LOCKSWBANKS[i]);
     
     if (swState != lockSwState[i]) {
@@ -99,12 +112,25 @@ void loop() {
         Serial.println("Door opened.");
         Serial3.println("Door opened.");
         if (doorOpenLighting)
-          setLED(0, DOOROPEN_COLOR);
+          Serial.print("n = ");
+          Serial.println(n);
+          for(n = 0; n < _LEN(LEDBANKS, int) / 3; n++) {
+            if (ledToLockBank[n] == i) {
+              setLED(n, DOOROPEN_COLOR);
+            }
+          }
       } else {
         Serial.println("Door closed.");
         Serial3.println("Door closed.");
-        setLED(0, ledState[0]);
+        for(n = 0; n < _LEN(LEDBANKS, int) / 3; n++) {
+          Serial.print("n = ");
+          Serial.println(n);
+          if (ledToLockBank[n] == i) {
+            setLED(n, ledState[n]);
+          }
+        }
         if (lockOnClose[i] == 1) {
+          Serial.println("Locking after close.");
           digitalWrite(LOCKBANKS[i], HIGH);
           lockOnClose[i] = 0;
         }
@@ -144,12 +170,16 @@ void loop() {
         
         // Activate the color if the door is closed,
         // otherwise it will get activated on next closure.      
-        if (lockSwState[bank] || !doorOpenLighting)
+       if (!lockSwState[ledToLockBank[bank]] || !doorOpenLighting)
           setLED(bank, color);
         
         break;
       case 'g': // Get info
         int x;
+        Serial.print("Sizeof: ");
+        Serial.println(_LEN(LEDBANKS, int) / 3);
+        Serial.println(sizeof(int));
+        
         for(x = 0; x < _LEN(FANPORTS, int); x++) {
           activeSerial->print("f");
           activeSerial->print(x, DEC);
@@ -195,6 +225,7 @@ void loop() {
         lockState[bank-48] = 0;
         break;
       case 'r': // "press" switch connected to relay.
+        Serial.print("toggling relay");
         digitalWrite(RELAYPIN, HIGH);
         delay(RELAY_DELAY);
         digitalWrite(RELAYPIN, LOW);
